@@ -1,127 +1,187 @@
 """
-Rotas de autenticação (login/logout)
-"""
-from flask import Blueprint, request, jsonify
-from flask_login import login_user, logout_user, login_required
-from app import db, login_manager
-from app.models import User
+Rotas de autenticação da API
 
-# Criar Blueprint para autenticação
+Este módulo contém todas as rotas relacionadas à autenticação de usuários,
+incluindo registro, login, logout e gerenciamento de sessões.
+"""
+from flask import Blueprint, request, jsonify, current_app
+from flask_login import login_user, logout_user, login_required, current_user
+from werkzeug.security import check_password_hash
+
+from app import db, get_models
+
+# Criar blueprint para rotas de autenticação
 auth_bp = Blueprint('auth', __name__)
 
-
-@login_manager.user_loader
-def load_user(user_id):
+@auth_bp.route('/register', methods=['POST'])
+def register():
     """
-    Carrega usuário pelo ID para o Flask-Login
+    Registra um novo usuário no sistema
     
-    Args:
-        user_id (str): ID do usuário
-        
+    Body (JSON):
+        - username (str): Nome de usuário único
+        - email (str): Email único do usuário
+        - password (str): Senha do usuário
+    
     Returns:
-        User: Objeto do usuário ou None
+        JSON: Dados do usuário criado ou erro
     """
-    return User.query.get(int(user_id))
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'error': 'Dados não fornecidos'}), 400
+        
+        username = data.get('username', '').strip()
+        email = data.get('email', '').strip()
+        password = data.get('password', '')
+        
+        # Validações
+        if not username or len(username) < 3:
+            return jsonify({'error': 'Username deve ter pelo menos 3 caracteres'}), 400
+        
+        if not email or '@' not in email:
+            return jsonify({'error': 'Email inválido'}), 400
+        
+        if not password or len(password) < 6:
+            return jsonify({'error': 'Senha deve ter pelo menos 6 caracteres'}), 400
+        
+        models = get_models()
+        User = models['User']
+        
+        # Verificar se usuário já existe
+        if User.query.filter_by(username=username).first():
+            return jsonify({'error': 'Username já existe'}), 409
+        
+        if User.query.filter_by(email=email).first():
+            return jsonify({'error': 'Email já está em uso'}), 409
+        
+        # Criar novo usuário
+        user = User(username=username, email=email)
+        user.set_password(password)
+        
+        db.session.add(user)
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Usuário criado com sucesso',
+            'user': user.to_dict()
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f'Erro no registro: {str(e)}')
+        return jsonify({'error': 'Erro interno do servidor'}), 500
 
 
 @auth_bp.route('/login', methods=['POST'])
 def login():
     """
-    Endpoint para fazer login
+    Realiza login do usuário
     
-    Request JSON:
-        {
-            "username": "string",
-            "password": "string"
-        }
+    Body (JSON):
+        - username (str): Nome de usuário ou email
+        - password (str): Senha do usuário
     
     Returns:
-        JSON: Resposta com status do login
+        JSON: Dados do usuário logado ou erro
     """
     try:
         data = request.get_json()
         
-        if not data or 'username' not in data or 'password' not in data:
-            return jsonify({"message": "Username and password are required"}), 400
+        if not data:
+            return jsonify({'error': 'Dados não fornecidos'}), 400
         
-        user = User.query.filter_by(
-            username=data['username'], 
-            password=data['password']
+        username = data.get('username', '').strip()
+        password = data.get('password', '')
+        
+        if not username or not password:
+            return jsonify({'error': 'Username e senha são obrigatórios'}), 400
+        
+        models = get_models()
+        User = models['User']
+        
+        # Buscar usuário por username ou email
+        user = User.query.filter(
+            (User.username == username) | (User.email == username)
         ).first()
         
-        if user:
-            login_user(user)
-            return jsonify({
-                "message": "Login successful", 
-                "user_id": user.id,
-                "username": user.username
-            }), 200
+        if not user or not user.check_password(password):
+            return jsonify({'error': 'Credenciais inválidas'}), 401
         
-        return jsonify({"message": "Invalid credentials"}), 401
+        if not user.is_active:
+            return jsonify({'error': 'Conta desativada'}), 403
+        
+        # Fazer login
+        login_user(user)
+        
+        return jsonify({
+            'message': 'Login realizado com sucesso',
+            'user': user.to_dict()
+        }), 200
         
     except Exception as e:
-        return jsonify({"message": f"Error during login: {str(e)}"}), 500
+        current_app.logger.error(f'Erro no login: {str(e)}')
+        return jsonify({'error': 'Erro interno do servidor'}), 500
 
 
 @auth_bp.route('/logout', methods=['POST'])
 @login_required
 def logout():
     """
-    Endpoint para fazer logout
+    Realiza logout do usuário atual
     
     Returns:
-        JSON: Resposta confirmando logout
+        JSON: Mensagem de confirmação
     """
     try:
         logout_user()
-        return jsonify({"message": "Logout successful"}), 200
+        return jsonify({'message': 'Logout realizado com sucesso'}), 200
+        
     except Exception as e:
-        return jsonify({"message": f"Error during logout: {str(e)}"}), 500
+        current_app.logger.error(f'Erro no logout: {str(e)}')
+        return jsonify({'error': 'Erro interno do servidor'}), 500
 
 
-@auth_bp.route('/api/user/register', methods=['POST'])
-def register():
+@auth_bp.route('/me', methods=['GET'])
+@login_required
+def get_current_user():
     """
-    Endpoint para registrar novo usuário
-    
-    Request JSON:
-        {
-            "username": "string",
-            "email": "string",
-            "password": "string"
-        }
+    Retorna dados do usuário atual
     
     Returns:
-        JSON: Resposta com status do registro
+        JSON: Dados do usuário logado
     """
     try:
-        data = request.get_json()
-        
-        if not data or not all(key in data for key in ['username', 'email', 'password']):
-            return jsonify({"message": "Username, email and password are required"}), 400
-        
-        # Verificar se usuário já existe
-        if User.query.filter_by(username=data['username']).first():
-            return jsonify({"message": "Username already exists"}), 409
-        
-        if User.query.filter_by(email=data['email']).first():
-            return jsonify({"message": "Email already exists"}), 409
-        
-        # Criar novo usuário
-        user = User(
-            username=data['username'],
-            email=data['email'],
-            password=data['password']  # Em produção, usar hash da senha
-        )
-        
-        db.session.add(user)
-        db.session.commit()
-        
         return jsonify({
-            "message": "User registered successfully",
-            "user_id": user.id
-        }), 201
+            'user': current_user.to_dict()
+        }), 200
         
     except Exception as e:
-        db.session.rollback()
-        return jsonify({"message": f"Error during registration: {str(e)}"}), 500
+        current_app.logger.error(f'Erro ao buscar usuário atual: {str(e)}')
+        return jsonify({'error': 'Erro interno do servidor'}), 500
+
+
+@auth_bp.route('/users', methods=['GET'])
+@login_required
+def list_users():
+    """
+    Lista todos os usuários (apenas para demonstração)
+    
+    Returns:
+        JSON: Lista de usuários
+    """
+    try:
+        models = get_models()
+        User = models['User']
+        
+        users = User.query.all()
+        
+        return jsonify({
+            'users': [user.to_dict() for user in users],
+            'total': len(users)
+        }), 200
+        
+    except Exception as e:
+        current_app.logger.error(f'Erro ao listar usuários: {str(e)}')
+        return jsonify({'error': 'Erro interno do servidor'}), 500
